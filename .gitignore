@@ -1,0 +1,21 @@
+﻿# Node / Expo
+node_modules/
+.expo/
+.expo-shared/
+.metro/
+dist/
+build/
+# Native projects (if created later)
+android/
+ios/
+# Logs & OS files
+npm-debug.log*
+yarn-error.log*
+*.log
+.DS_Store
+Thumbs.db
+# TypeScript
+*.tsbuildinfo
+# Env
+.env
+.env.*.local

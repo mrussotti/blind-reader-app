@@ -1,34 +1,33 @@
 {
   "expo": {
-    "name": "app",
-    "slug": "app",
-    "version": "1.0.0",
-    "orientation": "portrait",
+    "name": "Blind Document Reader",
+    "slug": "blind-reader",
+    "version": "2.0.0",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#000000"
     },
-    "plugins": ["expo-camera"],
     "ios": {
-      "supportsTablet": true,
+      "bundleIdentifier": "com.mrussotti.blindreader",
+      "buildNumber": "2.0.0",
+      "supportsTablet": false,
       "infoPlist": {
-        "NSCameraUsageDescription": "This app uses the camera to read printed text aloud."
+        "NSCameraUsageDescription": "This app uses the camera to read printed text aloud.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
-      },
-      "edgeToEdgeEnabled": true,
-      "permissions": ["CAMERA"]
+      }
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
+    "extra": {
+      "eas": {
+        "projectId": "717a15ed-5e6f-4eac-a710-976c8bb2bd94"
+      }
     }
   }
 }

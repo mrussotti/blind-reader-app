@@ -11,9 +11,9 @@ import {
   ScrollView,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import * as Speech from "expo-speech";
 import * as Haptics from "expo-haptics";
 import { setIsAudioActiveAsync, setAudioModeAsync } from "expo-audio";
+import { Audio } from "expo-av";
 
 // Configure your backend (prefer EXPO_PUBLIC_BACKEND_URL for builds)
 const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL?.replace(/\/$/, "");
@@ -29,7 +29,7 @@ export default function App() {
   const [lastText, setLastText] = useState<string>("");
   const [showTranscript, setShowTranscript] = useState<boolean>(true);
   const captureBtnRef = useRef<View | null>(null);
-  const [selectedVoice, setSelectedVoice] = useState<string | undefined>(undefined);
+  const soundRef = useRef<Audio.Sound | null>(null);
 
   // Track last tap timestamp for double-tap
   const lastTapTsRef = useRef<number>(0);
@@ -37,7 +37,7 @@ export default function App() {
   // Combined initialization: audio setup + camera ready message
   useEffect(() => {
     (async () => {
-      // First, configure audio
+      // Configure audio for playback
       try {
         await setIsAudioActiveAsync(true);
         await setAudioModeAsync({
@@ -48,79 +48,7 @@ export default function App() {
         console.warn("Failed to configure audio session:", err);
       }
 
-      // Select the best available voice
-      try {
-        const voices = await Speech.getAvailableVoicesAsync();
-        const englishVoices = voices.filter(v => v.language.startsWith('en'));
-        
-        console.log('=== ALL AVAILABLE VOICES ===');
-        englishVoices.forEach(v => {
-          console.log(`Name: ${v.name}`);
-          console.log(`Quality: ${v.quality}`);
-          console.log(`Identifier: ${v.identifier}`);
-          console.log(`Language: ${v.language}`);
-          console.log('---');
-        });
-        
-        // Try to find the best voice in order of preference
-        let bestVoice = undefined;
-        
-        // 1. Try Siri voices (best quality on iOS)
-        if (!bestVoice) {
-          bestVoice = englishVoices.find(v => 
-            v.identifier.toLowerCase().includes('siri') ||
-            v.name.toLowerCase().includes('siri')
-          );
-          if (bestVoice) console.log('✓ Found Siri voice');
-        }
-        
-        // 2. Try Premium quality voices
-        if (!bestVoice) {
-          bestVoice = englishVoices.find(v => 
-            v.identifier.toLowerCase().includes('premium') ||
-            (v.quality as string)?.toLowerCase() === 'premium'
-          );
-          if (bestVoice) console.log('✓ Found Premium voice');
-        }
-        
-        // 3. Try Enhanced quality voices  
-        if (!bestVoice) {
-          bestVoice = englishVoices.find(v => 
-            v.identifier.toLowerCase().includes('enhanced') ||
-            (v.quality as string)?.toLowerCase() === 'enhanced'
-          );
-          if (bestVoice) console.log('✓ Found Enhanced voice');
-        }
-        
-        // 4. Try specific good voices by name
-        if (!bestVoice) {
-          const goodVoiceNames = ['ava', 'samantha', 'nicky', 'susan', 'karen', 'daniel'];
-          bestVoice = englishVoices.find(v => 
-            goodVoiceNames.some(name => v.name.toLowerCase().includes(name))
-          );
-          if (bestVoice) console.log('✓ Found quality voice by name');
-        }
-        
-        // 5. Last resort: first available English voice
-        if (!bestVoice && englishVoices.length > 0) {
-          bestVoice = englishVoices[0];
-          console.log('⚠ Using fallback voice');
-        }
-        
-        if (bestVoice) {
-          setSelectedVoice(bestVoice.identifier);
-          console.log('=== SELECTED VOICE ===');
-          console.log(`Name: ${bestVoice.name}`);
-          console.log(`Quality: ${bestVoice.quality}`);
-          console.log(`Identifier: ${bestVoice.identifier}`);
-        } else {
-          console.log('❌ No English voices found!');
-        }
-      } catch (err) {
-        console.warn("Failed to get voices:", err);
-      }
-
-      // Then handle permissions and welcome message
+      // Handle permissions and welcome message
       if (!permission) return;
       if (!permission.granted) {
         const { granted } = await requestPermission();
@@ -131,17 +59,23 @@ export default function App() {
       await delay(500);
       
       try {
-        await speakAsync(
+        await speakWithTTS(
           "Camera ready. Point at a document with good lighting. " +
           "Make sure the text is clear and centered. " +
-          "Double tap anywhere on the camera to capture, or use the capture button.",
-          selectedVoice
+          "Double tap anywhere on the camera to capture, or use the capture button."
         );
       } catch {}
       
       const node = findNodeHandle(captureBtnRef.current);
       if (node) AccessibilityInfo.setAccessibilityFocus(node);
     })();
+
+    // Cleanup sound on unmount
+    return () => {
+      if (soundRef.current) {
+        soundRef.current.unloadAsync();
+      }
+    };
   }, [permission]);
 
   if (!permission) {
@@ -185,7 +119,7 @@ export default function App() {
       } catch {}
 
       AccessibilityInfo.announceForAccessibility("Photo taken. Processing.");
-      await speakAsync("Photo captured. Sending to server.", selectedVoice);
+      await speakWithTTS("Photo captured. Sending to server.");
       await delay(600);
 
       const photo = await cameraRef.current?.takePictureAsync({
@@ -198,7 +132,7 @@ export default function App() {
       const dataUrl = `data:image/jpeg;base64,${photo.base64}`;
       
       // Progress indicator
-      await speakAsync("Processing document. This may take a moment.", selectedVoice);
+      await speakWithTTS("Processing document. This may take a moment.");
       
       const resp = await fetch(`${BACKEND}/ocr`, {
         method: "POST",
@@ -230,19 +164,18 @@ export default function App() {
         AccessibilityInfo.announceForAccessibility(
           "I couldn't read any text. Try again with better lighting or framing."
         );
-        await speakAsync(
+        await speakWithTTS(
           "I couldn't read any text from this image. " +
-          "Please try again with better lighting, and make sure the document is centered and in focus.",
-          selectedVoice
+          "Please try again with better lighting, and make sure the document is centered and in focus."
         );
       } else {
         // Success haptic for text found
         await playSuccessHaptic();
         
         AccessibilityInfo.announceForAccessibility("Reading now.");
-        await speakAsync("Document processed successfully. Reading now.", selectedVoice);
+        await speakWithTTS("Document processed successfully. Reading now.");
         await delay(400);
-        await speakAll(text, selectedVoice);
+        await speakWithTTS(text);
       }
     } catch (e: any) {
       // Error haptic
@@ -275,7 +208,7 @@ export default function App() {
       AccessibilityInfo.announceForAccessibility(fullMessage);
       
       try { 
-        await speakAsync(fullMessage, selectedVoice); 
+        await speakWithTTS(fullMessage); 
       } catch {}
     } finally {
       try { 
@@ -293,6 +226,74 @@ export default function App() {
       onCapture();
     } else {
       lastTapTsRef.current = now;
+    }
+  }
+
+  // Speech helper using OpenAI TTS
+  async function speakWithTTS(text: string, voice: string = "nova"): Promise<void> {
+    try {
+      // Stop any currently playing sound
+      if (soundRef.current) {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      }
+
+      // Configure audio for playback
+      await setIsAudioActiveAsync(true);
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        allowsRecording: false,
+      });
+
+      // Request TTS audio from server
+      const response = await fetch(`${BACKEND}/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voice }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`TTS request failed: ${response.status}`);
+      }
+
+      // Get audio blob and create object URL
+      const audioBlob = await response.blob();
+      const reader = new FileReader();
+      
+      const base64Audio = await new Promise<string>((resolve, reject) => {
+        reader.onloadend = () => {
+          const base64 = reader.result as string;
+          resolve(base64.split(',')[1]); // Remove data:audio/mpeg;base64, prefix
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(audioBlob);
+      });
+
+      // Load and play audio
+      const { sound: newSound } = await Audio.Sound.createAsync(
+        { uri: `data:audio/mpeg;base64,${base64Audio}` },
+        { shouldPlay: true }
+      );
+
+      soundRef.current = newSound;
+
+      // Wait for playback to finish
+      await new Promise<void>((resolve) => {
+        newSound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            resolve();
+          }
+        });
+      });
+
+      // Cleanup
+      await newSound.unloadAsync();
+      soundRef.current = null;
+
+    } catch (error) {
+      console.error("TTS Error:", error);
+      // Silently fail - don't block the user
     }
   }
 
@@ -346,7 +347,7 @@ export default function App() {
             onPress={async () => {
               await playButtonHaptic();
               setShowTranscript((s) => !s);
-              await speakAsync(showTranscript ? "Transcript hidden" : "Transcript shown", selectedVoice);
+              await speakWithTTS(showTranscript ? "Transcript hidden" : "Transcript shown");
             }}
             style={styles.secondaryBtn}
             accessibilityRole="button"
@@ -362,7 +363,7 @@ export default function App() {
               onPress={async () => {
                 await playButtonHaptic();
                 setLastText("");
-                await speakAsync("Transcript cleared", selectedVoice);
+                await speakWithTTS("Transcript cleared");
               }}
               style={[styles.secondaryBtn, { marginLeft: 10 }]}
               accessibilityRole="button"
@@ -420,67 +421,6 @@ async function playButtonHaptic() {
 }
 
 /* ---------------------------- Speech helpers ---------------------------- */
-
-async function speakAsync(utterance: string, voice?: string): Promise<void> {
-  return new Promise(async (resolve) => {
-    try {
-      try {
-        const speaking = await Speech.isSpeakingAsync();
-        if (speaking) {
-          Speech.stop();
-          await delay(80);
-        }
-      } catch {}
-
-      // FIXED: Re-assert audio configuration before each speech utterance using expo-audio
-      try {
-        await setIsAudioActiveAsync(true);
-        await setAudioModeAsync({
-          playsInSilentMode: true,
-          allowsRecording: false,
-        });
-      } catch (err) {
-        console.warn("Failed to set audio mode before speech:", err);
-      }
-
-      Speech.speak(utterance, {
-        language: "en-US",
-        pitch: 1.0,
-        rate: 0.9,
-        volume: 1.0,
-        // Only use voice if we found a good one, otherwise let iOS choose
-        ...(voice ? { voice } : {}),
-        onDone: resolve,
-        onStopped: resolve,
-        onError: () => resolve(),
-      });
-    } catch {
-      resolve();
-    }
-  });
-}
-
-async function speakAll(text: string, voice?: string) {
-  const chunks = splitIntoChunks(text, 700);
-  for (const c of chunks) await speakAsync(c, voice);
-}
-
-function splitIntoChunks(s: string, max: number): string[] {
-  const out: string[] = [];
-  const parts = s.replace(/\s+/g, " ").split(/(?<=[\.\?\!])\s+/g);
-  let buf = "";
-  for (const p of parts) {
-    if ((buf + " " + p).trim().length <= max) buf = (buf ? buf + " " : "") + p;
-    else {
-      if (buf) out.push(buf);
-      if (p.length <= max) out.push(p);
-      else for (let i = 0; i < p.length; i += max) out.push(p.slice(i, i + max));
-      buf = "";
-    }
-  }
-  if (buf) out.push(buf);
-  return out;
-}
 
 function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));

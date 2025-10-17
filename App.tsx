@@ -13,12 +13,13 @@ import {
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Speech from "expo-speech";
 import * as Haptics from "expo-haptics";
-import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from "expo-av";
+import { setIsAudioActiveAsync, setAudioModeAsync } from "expo-audio";
 
 // Configure your backend (prefer EXPO_PUBLIC_BACKEND_URL for builds)
-const BACKEND =
-  process.env.EXPO_PUBLIC_BACKEND_URL?.replace(/\/$/, "") ||
-  "http://192.168.1.49:4000";
+const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL?.replace(/\/$/, "");
+
+// Double-tap timing window (ms)
+const DOUBLE_TAP_MS = 325;
 
 export default function App() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -26,25 +27,23 @@ export default function App() {
 
   const [busy, setBusy] = useState(false);
   const [lastText, setLastText] = useState<string>("");
-  const [showTranscript, setShowTranscript] = useState<boolean>(true); // set false to hide by default
+  const [showTranscript, setShowTranscript] = useState<boolean>(true);
   const captureBtnRef = useRef<View | null>(null);
 
-  // Robust audio session: play in Silent mode, mix with VO
+  // Track last tap timestamp for double-tap
+  const lastTapTsRef = useRef<number>(0);
+
+  // FIXED: Robust audio session that plays in Silent mode using expo-audio
   useEffect(() => {
     (async () => {
       try {
-        await Audio.setIsEnabledAsync(true);
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: true,                 // PlayAndRecord category helps with Silent mode
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: true,
-          interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
-          shouldDuckAndroid: true,
-          interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-          playThroughEarpieceAndroid: false,
+        await setIsAudioActiveAsync(true);
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          allowsRecording: false,
         });
-      } catch {
-        // no-op
+      } catch (err) {
+        console.warn("Failed to configure audio session:", err);
       }
     })();
   }, []);
@@ -59,7 +58,7 @@ export default function App() {
       }
 
       try {
-        await speakAsync("Camera ready. Double tap the button below to take a photo.");
+        await speakAsync("Camera ready. Double tap anywhere on the camera to take a photo.");
       } catch {}
       const node = findNodeHandle(captureBtnRef.current);
       if (node) AccessibilityInfo.setAccessibilityFocus(node);
@@ -106,7 +105,7 @@ export default function App() {
       } catch {}
 
       AccessibilityInfo.announceForAccessibility("Photo taken. Processing.");
-      await delay(600); // avoid VO/TTS collision
+      await delay(600);
 
       const photo = await cameraRef.current?.takePictureAsync({
         base64: true,
@@ -151,21 +150,44 @@ export default function App() {
     }
   }
 
+  // Camera double-tap overlay handler (non-VO users)
+  function onCameraTap() {
+    const now = Date.now();
+    if (now - lastTapTsRef.current <= DOUBLE_TAP_MS) {
+      lastTapTsRef.current = 0;
+      onCapture();
+    } else {
+      lastTapTsRef.current = now;
+    }
+  }
+
   return (
     <View style={styles.root}>
-      <CameraView
-        ref={cameraRef}
-        style={styles.camera}
-        facing="back"
-        accessibilityLabel="Camera view. Double tap the button at the bottom to capture."
-      />
+      {/* Camera area with an invisible double-tap overlay */}
+      <View style={styles.cameraWrap}>
+        <CameraView
+          ref={cameraRef}
+          style={styles.camera}
+          facing="back"
+          accessibilityLabel="Camera view. Double tap anywhere on the camera to capture."
+        />
+        <Pressable
+          style={StyleSheet.absoluteFillObject}
+          onPress={onCameraTap}
+          accessible={false}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          <View pointerEvents="none" />
+        </Pressable>
+      </View>
 
       {/* Bottom sheet */}
       <View style={styles.sheet}>
         <View style={styles.headerRow}>
           <Text style={styles.appTitle}>Blind Document Reader</Text>
           <Text style={styles.appSubtitle}>
-            Point at a document and tap “Capture & Read”
+            Point at a document and double tap the camera — or use the button.
           </Text>
         </View>
 
@@ -243,19 +265,16 @@ async function speakAsync(utterance: string): Promise<void> {
         }
       } catch {}
 
-      // Re-assert audio mode just-in-time (helps keep Silent-mode playback reliable)
+      // FIXED: Re-assert audio configuration before each speech utterance using expo-audio
       try {
-        await Audio.setIsEnabledAsync(true);
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: true,
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: true,
-          interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
-          shouldDuckAndroid: true,
-          interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-          playThroughEarpieceAndroid: false,
+        await setIsAudioActiveAsync(true);
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          allowsRecording: false,
         });
-      } catch {}
+      } catch (err) {
+        console.warn("Failed to set audio mode before speech:", err);
+      }
 
       Speech.speak(utterance, {
         language: "en-US",
@@ -306,9 +325,10 @@ async function safeJson(resp: Response) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "black" },
+
+  cameraWrap: { flex: 1 },
   camera: { flex: 1 },
 
-  // Bottom sheet
   sheet: {
     position: "absolute",
     left: 0,
@@ -317,7 +337,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 16,
-    backgroundColor: "rgba(9, 9, 11, 0.78)", // near-black with transparency
+    backgroundColor: "rgba(9, 9, 11, 0.78)",
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderWidth: 1,
@@ -340,7 +360,7 @@ const styles = StyleSheet.create({
   primaryBtnLarge: {
     height: 72,
     borderRadius: 36,
-    backgroundColor: "#1f2937", // slate-800
+    backgroundColor: "#1f2937",
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#000",
@@ -380,7 +400,7 @@ const styles = StyleSheet.create({
     marginTop: 12,
     padding: 12,
     borderRadius: 14,
-    backgroundColor: "rgba(2,6,23,0.66)", // slate-950 w/ alpha
+    backgroundColor: "rgba(2,6,23,0.66)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.06)",
   },
@@ -401,7 +421,6 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  // Permission screen
   center: {
     flex: 1,
     backgroundColor: "black",

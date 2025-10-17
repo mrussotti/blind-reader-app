@@ -33,9 +33,10 @@ export default function App() {
   // Track last tap timestamp for double-tap
   const lastTapTsRef = useRef<number>(0);
 
-  // FIXED: Robust audio session that plays in Silent mode using expo-audio
+  // Combined initialization: audio setup + camera ready message
   useEffect(() => {
     (async () => {
+      // First, configure audio
       try {
         await setIsAudioActiveAsync(true);
         await setAudioModeAsync({
@@ -45,21 +46,25 @@ export default function App() {
       } catch (err) {
         console.warn("Failed to configure audio session:", err);
       }
-    })();
-  }, []);
 
-  // Initial accessibility hint once permission is granted
-  useEffect(() => {
-    (async () => {
+      // Then handle permissions and welcome message
       if (!permission) return;
       if (!permission.granted) {
         const { granted } = await requestPermission();
         if (!granted) return;
       }
 
+      // Wait a moment for audio to be ready, then speak
+      await delay(300);
+      
       try {
-        await speakAsync("Camera ready. Double tap anywhere on the camera to take a photo.");
+        await speakAsync(
+          "Camera ready. Point at a document with good lighting. " +
+          "Make sure the text is clear and centered. " +
+          "Double tap anywhere on the camera to capture, or use the capture button."
+        );
       } catch {}
+      
       const node = findNodeHandle(captureBtnRef.current);
       if (node) AccessibilityInfo.setAccessibilityFocus(node);
     })();
@@ -100,11 +105,13 @@ export default function App() {
 
     setBusy(true);
     try {
+      // Success haptic feedback
       try {
         await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } catch {}
 
       AccessibilityInfo.announceForAccessibility("Photo taken. Processing.");
+      await speakAsync("Photo captured. Sending to server.");
       await delay(600);
 
       const photo = await cameraRef.current?.takePictureAsync({
@@ -115,6 +122,10 @@ export default function App() {
       if (!photo?.base64) throw new Error("Failed to capture image");
 
       const dataUrl = `data:image/jpeg;base64,${photo.base64}`;
+      
+      // Progress indicator
+      await speakAsync("Processing document. This may take a moment.");
+      
       const resp = await fetch(`${BACKEND}/ocr`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -123,7 +134,15 @@ export default function App() {
 
       if (!resp.ok) {
         const errBody = await safeJson(resp);
-        throw new Error(errBody?.error || `Server error ${resp.status}`);
+        
+        // Better error messages with guidance
+        if (resp.status === 500) {
+          throw new Error("SERVER_ERROR");
+        } else if (resp.status === 404) {
+          throw new Error("SERVER_NOT_FOUND");
+        } else {
+          throw new Error(errBody?.error || `Server error ${resp.status}`);
+        }
       }
 
       const json = (await resp.json()) as { text?: string; error?: string };
@@ -131,21 +150,62 @@ export default function App() {
       setLastText(text);
 
       if (!text) {
+        // Error haptic for no text found
+        await playErrorHaptic();
+        
         AccessibilityInfo.announceForAccessibility(
           "I couldn't read any text. Try again with better lighting or framing."
         );
-        await speakAsync("I couldn't read any text. Please try again with better lighting or framing.");
+        await speakAsync(
+          "I couldn't read any text from this image. " +
+          "Please try again with better lighting, and make sure the document is centered and in focus."
+        );
       } else {
+        // Success haptic for text found
+        await playSuccessHaptic();
+        
         AccessibilityInfo.announceForAccessibility("Reading now.");
-        await delay(600);
+        await speakAsync("Document processed successfully. Reading now.");
+        await delay(400);
         await speakAll(text);
       }
     } catch (e: any) {
-      const msg = String(e?.message || e || "Unexpected error");
-      AccessibilityInfo.announceForAccessibility(`Error: ${msg}`);
-      try { await speakAsync(`Error: ${msg}`); } catch {}
+      // Error haptic
+      await playErrorHaptic();
+      
+      // Better error messages with helpful guidance
+      let errorMessage = "Something went wrong.";
+      let guidance = "Please try again.";
+      
+      const errorStr = String(e?.message || e || "");
+      
+      if (errorStr.includes("Network request failed") || errorStr.includes("Failed to fetch")) {
+        errorMessage = "Cannot connect to server.";
+        guidance = "Please check your internet connection and make sure the server is running, then try again.";
+      } else if (errorStr === "SERVER_ERROR") {
+        errorMessage = "Server error occurred.";
+        guidance = "The server is having trouble processing your request. Please wait a moment and try again.";
+      } else if (errorStr === "SERVER_NOT_FOUND") {
+        errorMessage = "Cannot reach server.";
+        guidance = "Please make sure the server is running and your device is connected to the same network.";
+      } else if (errorStr.includes("Failed to capture image")) {
+        errorMessage = "Camera error.";
+        guidance = "Failed to take the photo. Please try again.";
+      } else {
+        errorMessage = "An unexpected error occurred.";
+        guidance = errorStr.substring(0, 100);
+      }
+      
+      const fullMessage = `${errorMessage} ${guidance}`;
+      AccessibilityInfo.announceForAccessibility(fullMessage);
+      
+      try { 
+        await speakAsync(fullMessage); 
+      } catch {}
     } finally {
-      try { await Haptics.selectionAsync(); } catch {}
+      try { 
+        await Haptics.selectionAsync(); 
+      } catch {}
       setBusy(false);
     }
   }
@@ -208,7 +268,11 @@ export default function App() {
 
         <View style={styles.controlsRow}>
           <Pressable
-            onPress={() => setShowTranscript((s) => !s)}
+            onPress={async () => {
+              await playButtonHaptic();
+              setShowTranscript((s) => !s);
+              await speakAsync(showTranscript ? "Transcript hidden" : "Transcript shown");
+            }}
             style={styles.secondaryBtn}
             accessibilityRole="button"
             accessibilityLabel={showTranscript ? "Hide transcript" : "Show transcript"}
@@ -220,7 +284,11 @@ export default function App() {
 
           {lastText ? (
             <Pressable
-              onPress={() => setLastText("")}
+              onPress={async () => {
+                await playButtonHaptic();
+                setLastText("");
+                await speakAsync("Transcript cleared");
+              }}
               style={[styles.secondaryBtn, { marginLeft: 10 }]}
               accessibilityRole="button"
               accessibilityLabel="Clear transcript"
@@ -250,6 +318,30 @@ export default function App() {
       </View>
     </View>
   );
+}
+
+/* ---------------------------- Haptic Helpers ---------------------------- */
+
+async function playSuccessHaptic() {
+  try {
+    // Double pulse for success
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    await delay(100);
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+  } catch {}
+}
+
+async function playErrorHaptic() {
+  try {
+    // Triple pulse for error
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+  } catch {}
+}
+
+async function playButtonHaptic() {
+  try {
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  } catch {}
 }
 
 /* ---------------------------- Speech helpers ---------------------------- */

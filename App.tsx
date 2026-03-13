@@ -8,36 +8,90 @@ import {
   findNodeHandle,
   StyleSheet,
   Platform,
-  ScrollView,
 } from "react-native";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { CameraView } from "expo-camera";
 import * as Haptics from "expo-haptics";
 import { setIsAudioActiveAsync, setAudioModeAsync } from "expo-audio";
-import { Audio } from "expo-av";
 
-// Configure your backend (prefer EXPO_PUBLIC_BACKEND_URL for builds)
-const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL?.replace(/\/$/, "");
+import { useCamera } from "./src/hooks/useCamera";
+import { useTTS } from "./src/hooks/useTTS";
+import { useVoiceCommands } from "./src/hooks/useVoiceCommands";
+import { healthCheck, pingServer, ocrRequest } from "./src/services/api";
+import {
+  playSuccessHaptic,
+  playErrorHaptic,
+} from "./src/utils/haptics";
+import { CaptureButton } from "./src/components/CaptureButton";
+import { ControlsRow } from "./src/components/ControlsRow";
+import { TranscriptCard } from "./src/components/TranscriptCard";
+import { styles } from "./src/styles";
 
-// Double-tap timing window (ms)
 const DOUBLE_TAP_MS = 325;
 
 export default function App() {
-  const [permission, requestPermission] = useCameraPermissions();
-  const cameraRef = useRef<CameraView | null>(null);
+  const { cameraRef, permission, requestPermission, takePicture } = useCamera();
+  const { speakLocal, speakDocument, stopAll, isPlaying, cleanup } = useTTS();
 
   const [busy, setBusy] = useState(false);
-  const [lastText, setLastText] = useState<string>("");
-  const [showTranscript, setShowTranscript] = useState<boolean>(true);
-  const captureBtnRef = useRef<View | null>(null);
-  const soundRef = useRef<Audio.Sound | null>(null);
+  const [lastText, setLastText] = useState("");
+  const [showTranscript, setShowTranscript] = useState(true);
 
-  // Track last tap timestamp for double-tap
+  const captureBtnRef = useRef<View | null>(null);
   const lastTapTsRef = useRef<number>(0);
 
-  // Combined initialization: audio setup + camera ready message
+  // ── Voice commands ──
+
+  const commandHandlerRef = useRef<((cmd: string) => Promise<void>) | null>(
+    null
+  );
+  const { startListening, stopListening } =
+    useVoiceCommands(commandHandlerRef);
+
+  // Always keep the handler fresh so it sees latest state
+  commandHandlerRef.current = async (command: string) => {
+    stopListening();
+
+    switch (command) {
+      case "capture":
+        await onCapture();
+        break;
+      case "replay":
+        if (lastText) {
+          await speakDocument(lastText);
+        } else {
+          await speakLocal(
+            "No document to replay. Say capture to take a photo."
+          );
+        }
+        break;
+      case "stop":
+        await stopAll();
+        await speakLocal("Stopped.");
+        break;
+      case "clear":
+        setLastText("");
+        await speakLocal("Transcript cleared.");
+        break;
+      case "help":
+        await speakLocal(
+          "Available commands. " +
+            "Say capture to take a photo. " +
+            "Say replay to hear the document again. " +
+            "Say stop to stop audio. " +
+            "Say clear to clear the transcript."
+        );
+        break;
+    }
+
+    // Resume listening after the action finishes
+    await delay(300);
+    startListening();
+  };
+
+  // ── Initialization: audio setup, server warm-up, welcome ──
+
   useEffect(() => {
     (async () => {
-      // Configure audio for playback
       try {
         await setIsAudioActiveAsync(true);
         await setAudioModeAsync({
@@ -48,41 +102,49 @@ export default function App() {
         console.warn("Failed to configure audio session:", err);
       }
 
-      // Handle permissions and welcome message
       if (!permission) return;
       if (!permission.granted) {
         const { granted } = await requestPermission();
         if (!granted) return;
       }
 
-      // Wait a moment for audio to be ready, then speak
+      // Wake the Render instance in background
+      pingServer();
+
       await delay(500);
-      
-      try {
-        await speakWithTTS(
-          "Camera ready. Point at a document with good lighting. " +
-          "Make sure the text is clear and centered. " +
-          "Double tap anywhere on the camera to capture, or use the capture button."
-        );
-      } catch {}
-      
+
+      // Check if server is warming up
+      const serverOk = await healthCheck();
+      if (!serverOk) {
+        await speakLocal("Server is warming up. This may take a moment.");
+      }
+
+      await speakLocal(
+        "Camera ready. You can say capture to take a photo, " +
+          "or double tap anywhere on the screen. Say help for all commands."
+      );
+
       const node = findNodeHandle(captureBtnRef.current);
       if (node) AccessibilityInfo.setAccessibilityFocus(node);
+
+      // Start listening for voice commands
+      await delay(300);
+      startListening();
     })();
 
-    // Cleanup sound on unmount
     return () => {
-      if (soundRef.current) {
-        soundRef.current.unloadAsync();
-      }
+      stopListening();
+      cleanup();
     };
   }, [permission]);
+
+  // ── Permission screens ──
 
   if (!permission) {
     return (
       <View style={styles.center}>
         <ActivityIndicator />
-        <Text style={styles.mono}>Requesting camera permission…</Text>
+        <Text style={styles.mono}>Requesting camera permission...</Text>
       </View>
     );
   }
@@ -108,94 +170,85 @@ export default function App() {
     );
   }
 
+  // ── Capture flow ──
+
   async function onCapture() {
     if (busy) return;
-
     setBusy(true);
+
     try {
-      // Success haptic feedback
-      try {
-        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      } catch {}
+      // 1. Take photo + check server health in parallel
+      const [dataUrl, serverOk] = await Promise.all([
+        takePicture(),
+        healthCheck(),
+      ]);
 
-      AccessibilityInfo.announceForAccessibility("Photo taken. Processing.");
-      await speakWithTTS("Photo captured. Sending to server.");
-      await delay(600);
-
-      const photo = await cameraRef.current?.takePictureAsync({
-        base64: true,
-        quality: 0.65,
-        skipProcessing: true,
-      });
-      if (!photo?.base64) throw new Error("Failed to capture image");
-
-      const dataUrl = `data:image/jpeg;base64,${photo.base64}`;
-      
-      // Progress indicator
-      await speakWithTTS("Processing document. This may take a moment.");
-      
-      const resp = await fetch(`${BACKEND}/ocr`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: dataUrl }),
-      });
-
-      if (!resp.ok) {
-        const errBody = await safeJson(resp);
-        
-        // Better error messages with guidance
-        if (resp.status === 500) {
-          throw new Error("SERVER_ERROR");
-        } else if (resp.status === 404) {
-          throw new Error("SERVER_NOT_FOUND");
-        } else {
-          throw new Error(errBody?.error || `Server error ${resp.status}`);
-        }
+      if (!serverOk) {
+        await playErrorHaptic();
+        await speakLocal(
+          "Cannot reach server. Please check your internet connection."
+        );
+        return;
       }
 
-      const json = (await resp.json()) as { text?: string; error?: string };
-      const text = (json.text ?? "").trim();
+      // 2. Photo succeeded — announce (fixes race condition: photo FIRST, then announce)
+      try {
+        await Haptics.notificationAsync(
+          Haptics.NotificationFeedbackType.Success
+        );
+      } catch {}
+
+      await speakLocal("Photo captured. Processing document.");
+
+      // 3. Send to OCR (30 s timeout via api.ts)
+      const result = await ocrRequest(dataUrl);
+      const text = (result.text ?? "").trim();
+      const guidance = result.guidance?.trim();
+
       setLastText(text);
 
+      // 4. Speak positioning guidance if the model provided it
+      if (guidance) {
+        await speakLocal(guidance);
+      }
+
       if (!text) {
-        // Error haptic for no text found
         await playErrorHaptic();
-        
         AccessibilityInfo.announceForAccessibility(
           "I couldn't read any text. Try again with better lighting or framing."
         );
-        await speakWithTTS(
+        await speakLocal(
           "I couldn't read any text from this image. " +
-          "Please try again with better lighting, and make sure the document is centered and in focus."
+            "Please try again with better lighting, and make sure the document is centered and in focus."
         );
       } else {
-        // Success haptic for text found
         await playSuccessHaptic();
-        
         AccessibilityInfo.announceForAccessibility("Reading now.");
-        await speakWithTTS("Document processed successfully. Reading now.");
+        await speakLocal("Document ready. Reading now.");
         await delay(400);
-        await speakWithTTS(text);
+        await speakDocument(text);
       }
     } catch (e: any) {
-      // Error haptic
       await playErrorHaptic();
-      
-      // Better error messages with helpful guidance
+
       let errorMessage = "Something went wrong.";
       let guidance = "Please try again.";
-      
       const errorStr = String(e?.message || e || "");
-      
-      if (errorStr.includes("Network request failed") || errorStr.includes("Failed to fetch")) {
+
+      if (
+        errorStr.includes("Network request failed") ||
+        errorStr.includes("Failed to fetch") ||
+        errorStr.includes("aborted")
+      ) {
         errorMessage = "Cannot connect to server.";
-        guidance = "Please check your internet connection and make sure the server is running, then try again.";
+        guidance =
+          "Please check your internet connection and try again.";
       } else if (errorStr === "SERVER_ERROR") {
         errorMessage = "Server error occurred.";
-        guidance = "The server is having trouble processing your request. Please wait a moment and try again.";
+        guidance = "Please wait a moment and try again.";
       } else if (errorStr === "SERVER_NOT_FOUND") {
         errorMessage = "Cannot reach server.";
-        guidance = "Please make sure the server is running and your device is connected to the same network.";
+        guidance = "Please make sure the server is running.";
       } else if (errorStr.includes("Failed to capture image")) {
         errorMessage = "Camera error.";
         guidance = "Failed to take the photo. Please try again.";
@@ -203,22 +256,20 @@ export default function App() {
         errorMessage = "An unexpected error occurred.";
         guidance = errorStr.substring(0, 100);
       }
-      
+
       const fullMessage = `${errorMessage} ${guidance}`;
       AccessibilityInfo.announceForAccessibility(fullMessage);
-      
-      try { 
-        await speakWithTTS(fullMessage); 
-      } catch {}
+      await speakLocal(fullMessage);
     } finally {
-      try { 
-        await Haptics.selectionAsync(); 
+      try {
+        await Haptics.selectionAsync();
       } catch {}
       setBusy(false);
     }
   }
 
-  // Camera double-tap overlay handler (non-VO users)
+  // ── Double-tap handler for non-VoiceOver users ──
+
   function onCameraTap() {
     const now = Date.now();
     if (now - lastTapTsRef.current <= DOUBLE_TAP_MS) {
@@ -229,77 +280,10 @@ export default function App() {
     }
   }
 
-  // Speech helper using OpenAI TTS
-  async function speakWithTTS(text: string, voice: string = "nova"): Promise<void> {
-    try {
-      // Stop any currently playing sound
-      if (soundRef.current) {
-        await soundRef.current.stopAsync();
-        await soundRef.current.unloadAsync();
-        soundRef.current = null;
-      }
-
-      // Configure audio for playback
-      await setIsAudioActiveAsync(true);
-      await setAudioModeAsync({
-        playsInSilentMode: true,
-        allowsRecording: false,
-      });
-
-      // Request TTS audio from server
-      const response = await fetch(`${BACKEND}/tts`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, voice }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`TTS request failed: ${response.status}`);
-      }
-
-      // Get audio blob and create object URL
-      const audioBlob = await response.blob();
-      const reader = new FileReader();
-      
-      const base64Audio = await new Promise<string>((resolve, reject) => {
-        reader.onloadend = () => {
-          const base64 = reader.result as string;
-          resolve(base64.split(',')[1]); // Remove data:audio/mpeg;base64, prefix
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(audioBlob);
-      });
-
-      // Load and play audio
-      const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: `data:audio/mpeg;base64,${base64Audio}` },
-        { shouldPlay: true }
-      );
-
-      soundRef.current = newSound;
-
-      // Wait for playback to finish
-      await new Promise<void>((resolve) => {
-        newSound.setOnPlaybackStatusUpdate((status) => {
-          if (status.isLoaded && status.didJustFinish) {
-            resolve();
-          }
-        });
-      });
-
-      // Cleanup
-      await newSound.unloadAsync();
-      soundRef.current = null;
-
-    } catch (error) {
-      console.error("TTS Error:", error);
-      // Silently fail - don't block the user
-    }
-  }
+  // ── UI ──
 
   return (
     <View style={styles.root}>
-      {/* Camera area with an invisible double-tap overlay */}
       <View style={styles.cameraWrap}>
         <CameraView
           ref={cameraRef}
@@ -318,72 +302,39 @@ export default function App() {
         </Pressable>
       </View>
 
-      {/* Bottom sheet */}
       <View style={styles.sheet}>
         <View style={styles.headerRow}>
           <Text style={styles.appTitle}>Blind Document Reader</Text>
           <Text style={styles.appSubtitle}>
-            Point at a document and double tap the camera — or use the button.
+            Voice controlled — say "capture", "replay", "stop", or "help".
           </Text>
         </View>
 
-        <Pressable
+        <CaptureButton
           ref={captureBtnRef}
-          onPress={onCapture}
-          disabled={busy}
-          style={[styles.primaryBtnLarge, busy && { opacity: 0.7 }]}
-          accessibilityRole="button"
-          accessibilityLabel="Capture and read document"
-        >
-          {busy ? (
-            <ActivityIndicator />
-          ) : (
-            <Text style={styles.primaryBtnLargeText}>Capture & Read</Text>
-          )}
-        </Pressable>
+          onCapture={onCapture}
+          busy={busy}
+        />
 
-        <View style={styles.controlsRow}>
-          <Pressable
-            onPress={async () => {
-              await playButtonHaptic();
-              setShowTranscript((s) => !s);
-              await speakWithTTS(showTranscript ? "Transcript hidden" : "Transcript shown");
-            }}
-            style={styles.secondaryBtn}
-            accessibilityRole="button"
-            accessibilityLabel={showTranscript ? "Hide transcript" : "Show transcript"}
-          >
-            <Text style={styles.secondaryBtnText}>
-              {showTranscript ? "Hide Transcript" : "Show Transcript"}
-            </Text>
-          </Pressable>
+        <ControlsRow
+          showTranscript={showTranscript}
+          onToggleTranscript={() => {
+            setShowTranscript((s) => !s);
+            speakLocal(
+              showTranscript ? "Transcript hidden" : "Transcript shown"
+            );
+          }}
+          hasText={!!lastText}
+          onClear={() => {
+            setLastText("");
+            speakLocal("Transcript cleared");
+          }}
+          onReplay={() => speakDocument(lastText)}
+          onStop={stopAll}
+          isPlaying={isPlaying}
+        />
 
-          {lastText ? (
-            <Pressable
-              onPress={async () => {
-                await playButtonHaptic();
-                setLastText("");
-                await speakWithTTS("Transcript cleared");
-              }}
-              style={[styles.secondaryBtn, { marginLeft: 10 }]}
-              accessibilityRole="button"
-              accessibilityLabel="Clear transcript"
-            >
-              <Text style={styles.secondaryBtnText}>Clear</Text>
-            </Pressable>
-          ) : null}
-        </View>
-
-        {showTranscript && !!lastText && (
-          <View style={styles.transcriptCard}>
-            <Text style={styles.transcriptTitle}>Transcript</Text>
-            <ScrollView style={{ maxHeight: 160 }}>
-              <Text selectable style={styles.transcriptText}>
-                {lastText}
-              </Text>
-            </ScrollView>
-          </View>
-        )}
+        <TranscriptCard text={lastText} visible={showTranscript} />
 
         <Text style={styles.footerNote}>
           {Platform.select({
@@ -396,171 +347,6 @@ export default function App() {
   );
 }
 
-/* ---------------------------- Haptic Helpers ---------------------------- */
-
-async function playSuccessHaptic() {
-  try {
-    // Double pulse for success
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    await delay(100);
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-  } catch {}
-}
-
-async function playErrorHaptic() {
-  try {
-    // Triple pulse for error
-    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-  } catch {}
-}
-
-async function playButtonHaptic() {
-  try {
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-  } catch {}
-}
-
-/* ---------------------------- Speech helpers ---------------------------- */
-
 function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
-
-async function safeJson(resp: Response) {
-  try { return await resp.json(); } catch { return null; }
-}
-
-/* -------------------------------- Styles -------------------------------- */
-
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "black" },
-
-  cameraWrap: { flex: 1 },
-  camera: { flex: 1 },
-
-  sheet: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 16,
-    backgroundColor: "rgba(9, 9, 11, 0.78)",
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.06)",
-  },
-
-  headerRow: { marginBottom: 10 },
-  appTitle: {
-    color: "white",
-    fontSize: 18,
-    fontWeight: "800",
-    letterSpacing: 0.6,
-  },
-  appSubtitle: {
-    color: "rgba(255,255,255,0.75)",
-    marginTop: 2,
-    fontSize: 13,
-  },
-
-  primaryBtnLarge: {
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: "#1f2937",
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.35,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 6,
-  },
-  primaryBtnLargeText: {
-    color: "white",
-    fontSize: 20,
-    fontWeight: "800",
-    letterSpacing: 0.5,
-  },
-
-  controlsRow: {
-    marginTop: 10,
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  secondaryBtn: {
-    height: 44,
-    paddingHorizontal: 14,
-    borderRadius: 10,
-    backgroundColor: "rgba(255,255,255,0.08)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  secondaryBtnText: {
-    color: "white",
-    fontSize: 14,
-    fontWeight: "700",
-    letterSpacing: 0.3,
-  },
-
-  transcriptCard: {
-    marginTop: 12,
-    padding: 12,
-    borderRadius: 14,
-    backgroundColor: "rgba(2,6,23,0.66)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.06)",
-  },
-  transcriptTitle: {
-    color: "white",
-    fontWeight: "800",
-    marginBottom: 6,
-  },
-  transcriptText: {
-    color: "#e5e7eb",
-    lineHeight: 20,
-  },
-
-  footerNote: {
-    marginTop: 10,
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 12,
-    textAlign: "center",
-  },
-
-  center: {
-    flex: 1,
-    backgroundColor: "black",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
-  mono: { color: "white", opacity: 0.85 },
-
-  card: {
-    width: "92%",
-    padding: 18,
-    borderRadius: 16,
-    backgroundColor: "rgba(17,24,39,0.9)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.06)",
-  },
-  title: {
-    color: "white",
-    fontWeight: "800",
-    fontSize: 18,
-    marginBottom: 6,
-  },
-  bodyText: { color: "rgba(255,255,255,0.8)" },
-
-  primaryBtn: {
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#1f2937",
-    height: 48,
-    borderRadius: 12,
-  },
-  primaryBtnText: { color: "white", fontSize: 16, fontWeight: "800" },
-});

@@ -2,7 +2,8 @@
   "cli": { "appVersionSource": "remote" },
   "build": {
     "production": {
-      "ios": { "image": "latest" }
+      "ios": { "image": "latest" },
+      "android": { "image": "latest" }
     }
   }
 }

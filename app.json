@@ -15,6 +15,9 @@
       "supportsTablet": false,
       "infoPlist": {
         "NSCameraUsageDescription": "This app uses the camera to read printed text aloud.",
+        "NSPhotoLibraryUsageDescription": "This app does not save photos, but the camera system requires this permission.",
+        "NSMicrophoneUsageDescription": "This app uses the microphone for voice commands.",
+        "NSSpeechRecognitionUsageDescription": "This app uses speech recognition for voice commands.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },

@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- Document page -->
+  <g transform="translate(220, 180)">
+    <!-- Page shadow -->
+    <rect x="8" y="8" width="310" height="420" rx="28" fill="#000" opacity="0.3"/>
+    <!-- Page -->
+    <rect width="310" height="420" rx="28" fill="#f1f5f9"/>
+    <!-- Folded corner -->
+    <path d="M240 0 L310 0 L310 70 Z" fill="#cbd5e1"/>
+    <path d="M240 0 L310 70 L240 70 Z" fill="#e2e8f0"/>
+    <!-- Text lines -->
+    <rect x="40" y="80" width="200" height="18" rx="9" fill="#334155" opacity="0.25"/>
+    <rect x="40" y="120" width="160" height="18" rx="9" fill="#334155" opacity="0.25"/>
+    <rect x="40" y="160" width="190" height="18" rx="9" fill="#334155" opacity="0.25"/>
+    <rect x="40" y="200" width="140" height="18" rx="9" fill="#334155" opacity="0.25"/>
+    <rect x="40" y="260" width="200" height="18" rx="9" fill="#334155" opacity="0.15"/>
+    <rect x="40" y="300" width="170" height="18" rx="9" fill="#334155" opacity="0.15"/>
+    <rect x="40" y="340" width="190" height="18" rx="9" fill="#334155" opacity="0.15"/>
+  </g>
+
+  <!-- Sound waves -->
+  <g transform="translate(580, 390)" stroke="url(#wave)" fill="none" stroke-linecap="round">
+    <path d="M0 0 C40 -60, 40 60, 0 0" stroke-width="0"/>
+    <!-- Wave 1 (closest) -->
+    <path d="M20 -50 Q70 0 20 50" stroke-width="32" opacity="1"/>
+    <!-- Wave 2 -->
+    <path d="M60 -100 Q140 0 60 100" stroke-width="32" opacity="0.65"/>
+    <!-- Wave 3 (farthest) -->
+    <path d="M100 -155 Q210 0 100 155" stroke-width="32" opacity="0.35"/>
+  </g>
+
+  <!-- Small speaker dot -->
+  <circle cx="590" cy="390" r="22" fill="url(#wave)"/>
+</svg>
